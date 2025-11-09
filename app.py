@@ -26,6 +26,19 @@ GROUP_NAMES = {
 }
 
 # =========================================
+# RESET HOOK (apply before widgets)
+# =========================================
+if st.session_state.get("__RESET_ALL__", False):
+    # clear sidebar widget keys (they’ll be recreated with defaults)
+    for k in ["countries","anatomy","vector","symptoms","duration","animal",
+              "blood_film","lft","cysts_imaging","neuro","eos","fever",
+              "diarrhea","bloody","stool","anemia","ige","immune"]:
+        if k in st.session_state:
+            del st.session_state[k]
+    st.session_state["__RESET_ALL__"] = False
+    st.experimental_rerun()
+
+# =========================================
 # UTILITIES
 # =========================================
 def fmt_time(ts):
@@ -82,7 +95,7 @@ KEY_FIELDS_FOR_DIFF = [
 
 FIELD_TO_NEXT_TEST = {
     "Blood Film Result": "Blood film (thick/thin smear) or PCR",
-    "Stool Cysts or Ova": "Stool O&P (concentration, trichrome), antigen or PCR",
+    "Stool Cysts or Ova": "Stool O&P (concentration, trichrome); antigen or PCR",
     "Cysts on Imaging": "Targeted ultrasound/CT/MRI",
     "Eosinophilia": "CBC with differential; consider total IgE",
     "Neurological Involvement": "Neurological exam ± MRI/CT; CSF if indicated",
@@ -90,18 +103,13 @@ FIELD_TO_NEXT_TEST = {
     "Anatomy Involvement": "Focused exam or imaging of the organ system",
     "Symptoms": "Structured symptom review (GI pattern, RUQ pain, skin lesions)",
     "Liver Function Tests": "LFT panel",
-    "Fever": "Fever charting; malaria RDT if febrile + travel",
+    "Fever": "Fever charting; malaria RDT when appropriate",
 }
 
-def summarize_reasoning(top_row, user_input, nearby_rows):
+def summarize_reasoning(top_row, user_input, competitors_df):
     """
-    Produce adaptive reasoning text comparing the top species to other close candidates.
-    - nearby_rows: DataFrame of competitors within +/- 10% likelihood (excluding top_row)
-    Returns (reasoning_text, next_tests_list)
+    Produce rich, grammatical reasoning + adaptive comparison + targeted next tests.
     """
-    notes = []
-
-    # Positive matches (supporting the top species)
     def ui_has(field):
         val = user_input.get(field, ["Unknown"])
         if isinstance(val, list):
@@ -114,55 +122,53 @@ def summarize_reasoning(top_row, user_input, nearby_rows):
         ui_vals = [x.lower() for x in ui_vals] if isinstance(ui_vals, list) else [str(ui_vals).lower()]
         return any(u in ds for u in ui_vals)
 
-    positive_bits = []
+    support_bits = []
     if ui_has("Vector Exposure") and matches("Vector Exposure"):
-        positive_bits.append("vector exposure aligns")
+        support_bits.append("vector exposure aligns")
     if ui_has("Anatomy Involvement") and matches("Anatomy Involvement"):
-        positive_bits.append("organ involvement matches")
+        support_bits.append("organ involvement matches")
     if ui_has("Countries Visited") and matches("Countries Visited"):
-        positive_bits.append("geography is consistent")
+        support_bits.append("geography is consistent")
     if ui_has("Eosinophilia") and matches("Eosinophilia"):
-        positive_bits.append("eosinophilia pattern is supportive")
+        support_bits.append("eosinophilia pattern is supportive")
     if ui_has("Blood Film Result") and matches("Blood Film Result"):
-        positive_bits.append("blood film pattern is supportive")
+        support_bits.append("blood film findings are supportive")
     if ui_has("Cysts on Imaging") and matches("Cysts on Imaging"):
-        positive_bits.append("imaging pattern is consistent")
+        support_bits.append("imaging pattern is consistent")
 
-    if positive_bits:
-        notes.append("The " + ", ".join(positive_bits[:-1]) + ("," if len(positive_bits) > 1 else "") +
-                     (f" and {positive_bits[-1]}" if len(positive_bits) > 1 else f" {positive_bits[0]}") +
-                     f" for **{top_row['Parasite']}**.")
+    if support_bits:
+        s = ", ".join(support_bits[:-1]) + ("," if len(support_bits) > 1 else "")
+        tail = f" and {support_bits[-1]}" if len(support_bits) > 1 else support_bits[0]
+        reasoning = f"The {s}{tail} for **{top_row['Parasite']}**."
     else:
-        notes.append(f"The overall pattern is compatible with **{top_row['Parasite']}**, but direct matches are limited.")
+        reasoning = f"The overall pattern is compatible with **{top_row['Parasite']}**, though direct matches are limited."
 
-    # Differences versus close competitors
-    if not nearby_rows.empty:
-        diffs_sentences = []
-        for _, comp in nearby_rows.iterrows():
-            differing = []
+    # Adaptive comparison: only if close competitors present
+    comparison_lines = []
+    if not competitors_df.empty:
+        for _, comp in competitors_df.iterrows():
+            diffs = []
             for f in KEY_FIELDS_FOR_DIFF:
                 a = str(top_row.get(f, "")).lower()
                 b = str(comp.get(f, "")).lower()
                 if a != b:
-                    differing.append(f)
-            if differing:
-                diffs_sentences.append(
-                    f"Compared with **{comp['Parasite']}**, key differences include: " +
-                    ", ".join(differing[:3]) + ("" if len(differing) <= 3 else ", …") + "."
+                    diffs.append(f)
+            if diffs:
+                comparison_lines.append(
+                    f"Compared with **{comp['Parasite']}**, key differentiators are: " +
+                    ", ".join(diffs[:3]) + ("" if len(diffs) <= 3 else ", …") + "."
                 )
-        if diffs_sentences:
-            notes.append(" ".join(diffs_sentences))
 
-    # Next tests based on missing inputs
+    # Next tests: based on missing inputs
     next_tests = []
     for f, t in FIELD_TO_NEXT_TEST.items():
         val = user_input.get(f, ["Unknown"])
         is_unknown = (isinstance(val, list) and all(v == "Unknown" for v in val)) or (isinstance(val, str) and val.lower() == "unknown")
         if is_unknown:
             next_tests.append(t)
+    next_tests = sorted(set(next_tests))
 
-    reasoning_text = " ".join(notes)
-    return reasoning_text, sorted(set(next_tests))
+    return reasoning, comparison_lines, next_tests
 
 def compute_user_confidence(row: pd.Series, ui: dict) -> float:
     """
@@ -186,7 +192,7 @@ def compute_user_confidence(row: pd.Series, ui: dict) -> float:
         max_sc += 5
         if any_match(ui["Anatomy Involvement"], "Anatomy Involvement"):
             score += 5
-    # Vector (8) — full credit if ONLY Other(Including Unknown)
+    # Vector (8)
     if ui.get("Vector Exposure") and ui["Vector Exposure"] != ["Unknown"]:
         max_sc += 8
         lower_vec = [x.lower() for x in ui["Vector Exposure"]]
@@ -206,7 +212,7 @@ def compute_user_confidence(row: pd.Series, ui: dict) -> float:
         max_sc += 5
         if any_match(ui["Duration of Illness"], "Duration of Illness"):
             score += 5
-    # Animal contact (8)
+    # Animal (8)
     if ui.get("Animal Contact Type") and ui["Animal Contact Type"] != ["Unknown"]:
         max_sc += 8
         if any_match(ui["Animal Contact Type"], "Animal Contact Type"):
@@ -234,7 +240,7 @@ def compute_user_confidence(row: pd.Series, ui: dict) -> float:
         user_lft = ui["Liver Function Tests"][0].lower()
         if "variable" in ds or user_lft in ds:
             score += 5
-    # Lab flags (5 each)
+    # Lab flags (5 each) with Variable rule
     lab_fields = [
         "Neurological Involvement", "Eosinophilia", "Fever",
         "Diarrhea", "Bloody Diarrhea", "Stool Cysts or Ova",
@@ -262,7 +268,7 @@ def compute_user_confidence(row: pd.Series, ui: dict) -> float:
     return (score / max_sc) * 100 if max_sc > 0 else 0.0
 
 # =========================================
-# LIVE DATA RELOAD (no manual cache clear)
+# LIVE DATA RELOAD
 # =========================================
 @st.cache_resource(show_spinner=False)
 def init_engine():
@@ -303,13 +309,13 @@ with st.sidebar:
     st.divider()
     st.header("⚙️ Input Parameters")
 
-    # Widget helpers with keys so we can reset
     def multisel(label, col, key, extra=None):
         return st.multiselect(label, get_unique_values(df, col, extra), key=key)
 
     def selbox(label, col, key, extra=None):
         opts = get_unique_values(df, col, extra)
-        return st.selectbox(label, opts, index=0, key=key)
+        default_index = 0  # "Unknown"
+        return st.selectbox(label, opts, index=default_index, key=key)
 
     with st.expander("🌍 Environmental Data", expanded=False):
         countries = multisel("Countries Visited", "Countries Visited", key="countries")
@@ -343,11 +349,7 @@ with st.sidebar:
         go = st.button("🔍 Analyze", use_container_width=True)
     with colB:
         if st.button("♻️ Reset all", use_container_width=True):
-            # Clear sidebar inputs
-            for k in ["countries","anatomy","vector","symptoms","duration","animal"]:
-                st.session_state[k] = []
-            for k in ["blood_film","lft","cysts_imaging","neuro","eos","fever","diarrhea","bloody","stool","anemia","ige","immune"]:
-                st.session_state[k] = "Unknown"
+            st.session_state["__RESET_ALL__"] = True
             st.experimental_rerun()
 
 # =========================================
@@ -417,51 +419,63 @@ if go:
 
         with st.expander("Expand group details", expanded=first_group):
             st.markdown(
-                f"**User Confidence:** {grp['User Confidence']:.1f}%  |  "
-                f"**Total Confidence:** {grp['Total Confidence']:.1f}%"
+                f"**User Confidence (top species):** {grp['User Confidence']:.1f}%  |  "
+                f"**Total Confidence (top species):** {grp['Total Confidence']:.1f}%"
             )
             st.markdown("#### Species in this group")
 
             top_rows = grp["Top Rows"]
-            # We'll render each species as its own expander
             first_species = True if first_group else False
 
-            # Precompute “nearby” competitors for richer reasoning (±10% window)
-            # Do this once per species inside the loop
             for idx, row in top_rows.iterrows():
-                sp_color = pct_to_color(row["Likelihood (%)"])
-                sp_title = f"**{row['Parasite']}** {pill(f'{row['Likelihood (%)']:.1f}%', sp_color)} · Subtype: {row.get('Subtype','')}"
-                # Find nearby candidates in this group (within ±10% likelihood, excluding itself)
-                window = top_rows[
+                # Plain title (no HTML) to avoid showing raw tags
+                title_text = f"{row['Parasite']} · Subtype: {row.get('Subtype','')}"
+                # Nearby competitors within ±10%
+                nearby = top_rows[
                     (top_rows["Likelihood (%)"] >= row["Likelihood (%)"] - 10.0) &
                     (top_rows["Likelihood (%)"] <= row["Likelihood (%)"] + 10.0) &
                     (top_rows["Parasite"] != row["Parasite"])
                 ]
-                reasoning, next_tests = summarize_reasoning(row, ui, window)
+                reasoning, comparisons, next_tests = summarize_reasoning(row, ui, nearby)
 
-                with st.expander(sp_title, expanded=first_species):
-                    st.markdown(f"- **Reasoning:** {reasoning}")
-                    if len(window) > 0:
-                        comps = ", ".join(window["Parasite"].tolist())
-                        st.markdown(f"- **Close competitors considered:** {comps}")
+                with st.expander(title_text, expanded=first_species):
+                    # Put the colored chip at the top of the body (HTML allowed here)
+                    chip_html = pill(f"{row['Likelihood (%)']:.1f}%", pct_to_color(row["Likelihood (%)"]))
+                    st.markdown(chip_html, unsafe_allow_html=True)
+
+                    # Reasoning
+                    st.markdown(f"**Reasoning:** {reasoning}")
+
+                    # Comparison (adaptive)
+                    if comparisons:
+                        st.markdown("**Comparison to close candidates:**")
+                        for line in comparisons:
+                            st.markdown(f"- {line}")
+                        comps = ", ".join(nearby['Parasite'].tolist())
+                        st.caption(f"Close competitors considered: {comps}")
+
+                    # Next tests (adaptive to missing inputs)
                     if next_tests:
-                        st.markdown(f"- **Next tests to differentiate (based on missing inputs):** " + ", ".join(next_tests))
+                        st.markdown("**Next tests to differentiate (based on missing inputs):**")
+                        for t in next_tests:
+                            st.markdown(f"- {t}")
 
-                    # Confirmatory tests from Key Test / Key test / Key Notes
+                    # Confirmatory tests — split on ';'
                     key_text = str(row.get("Key Test", row.get("Key test", row.get("Key Notes", "")))).strip()
                     if key_text:
-                        bullets = [b.strip() for b in key_text.split(";") if b.strip()]
-                        if bullets:
-                            st.markdown("- **Confirmatory / definitive tests:**")
-                            for b in bullets:
-                                st.markdown(f"  - {b}")
+                        tests = [t.strip() for t in key_text.split(";") if t.strip()]
+                        if tests:
+                            st.markdown("**Confirmatory / definitive tests:**")
+                            for t in tests:
+                                st.markdown(f"- {t}")
 
+                    # Confidence summary
                     st.markdown(
-                        f"- **User Confidence:** {row['User Confidence (%)']:.1f}%"
-                        f"  ·  **Total Confidence:** {row['Total Confidence (%)']:.1f}%"
+                        f"**User Confidence:** {row['User Confidence (%)']:.1f}%  ·  "
+                        f"**Total Confidence:** {row['Total Confidence (%)']:.1f}%"
                     )
 
-                # Only auto-expand the very first species (in the first group)
+                # only auto-expand the very first species
                 first_species = False
 
         st.markdown("---")
