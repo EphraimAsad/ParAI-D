@@ -111,7 +111,6 @@ class ParasiteIdentifier:
                     if all(x != "negative" for x in db_bf):
                         score -= 10
                 else:
-                    # any non-negative pattern in DB supports +15
                     if any(x != "negative" for x in db_bf):
                         score += 15
 
@@ -152,12 +151,11 @@ class ParasiteIdentifier:
 
             out.append({
                 "Parasite": row.get("Parasite"),
-                "Group": row.get("Group"),          # keep group so app doesn't need to merge
+                "Group": row.get("Group"),
                 "Subtype": row.get("Subtype"),
                 "Score": score,
                 "Likelihood (%)": round((score / self.max_possible_score) * 100, 2),
                 "Key Test": row.get("Key Test", ""),
-                # Keep raw reference for reasoning (optional copy of the row)
                 "ref_row": row.to_dict()
             })
 
