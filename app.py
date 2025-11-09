@@ -10,7 +10,7 @@ from engine import ParasiteIdentifier
 st.set_page_config(page_title="🦠 ParAI-D: Intelligent Parasite Diagnostic Assistant", layout="wide")
 
 DATA_PATH = "ParasiteMasterData.xlsx"
-FIXED_MAX_SCORE = 113  # overall normalization
+FIXED_MAX_SCORE = 113  # normalization baseline
 
 GROUP_NAMES = {
     1: "Intestinal Protozoa",
@@ -26,7 +26,6 @@ GROUP_NAMES = {
     -1: "Unassigned / Unknown Group",
 }
 
-
 # -----------------------------
 # UTILS
 # -----------------------------
@@ -39,7 +38,9 @@ def fmt_time(ts):
 def get_unique_values(df, column, extra=None):
     vals = []
     for x in df[column].dropna().unique():
-        vals.extend([p.strip() for p in str(x).split(";") if p.strip()])
+        for part in str(x).split(";"):
+            if part.strip():
+                vals.append(part.strip())
     vals = sorted(set(vals))
     if extra:
         for e in extra:
@@ -48,14 +49,12 @@ def get_unique_values(df, column, extra=None):
     vals.insert(0, "Unknown")
     return vals
 
-
 def pct_to_color(pct: float):
     pct = max(0.0, min(100.0, pct)) / 100.0
     r = int(255 * (1 - pct))
     g = int(150 + 105 * pct)
     b = int(60 * (1 - pct))
     return f"#{r:02x}{g:02x}{b:02x}"
-
 
 def pill(text, color):
     return f"""
@@ -70,13 +69,75 @@ def progress_bar_html(percent, color):
     </div>
     """
 
+def split_vals(v):
+    return [s.strip().lower() for s in str(v).split(";") if s.strip()]
+
+# -----------------------------
+# REASONING & DIFFERENTIATION
+# -----------------------------
+def generate_reasoning(row, user_input, runner_row=None):
+    """Generate interpretive reasoning, comparisons, and next-test suggestions."""
+    notes = []
+
+    def in_row(field):
+        ds = split_vals(row.get(field, ""))
+        ui_vals = [x.lower() for x in user_input.get(field, ["Unknown"])]
+        return any(u in ds for u in ui_vals)
+
+    # Positive matches
+    if in_row("Vector Exposure"):
+        notes.append("Vector exposure aligns.")
+    if in_row("Anatomy Involvement"):
+        notes.append("Organ involvement matches.")
+    if in_row("Countries Visited"):
+        notes.append("Geographic pattern consistent.")
+    if in_row("Eosinophilia"):
+        notes.append("Eosinophilia pattern supportive.")
+    if in_row("Blood Film Result"):
+        notes.append("Blood film findings supportive.")
+    if in_row("Cysts on Imaging"):
+        notes.append("Imaging pattern consistent.")
+
+    # Differences from next species
+    if runner_row is not None:
+        diffs = []
+        for f in [
+            "Vector Exposure","Anatomy Involvement","Countries Visited",
+            "Eosinophilia","Blood Film Result","Cysts on Imaging","Symptoms"
+        ]:
+            a, b = str(row.get(f, "")).lower(), str(runner_row.get(f, "")).lower()
+            if a != b:
+                diffs.append(f)
+        if diffs:
+            notes.append(f"Differs from the next candidate in: {', '.join(diffs[:2])}.")
+
+    # Next tests to order (based on unfilled inputs)
+    next_tests = []
+    field_to_test = {
+        "Blood Film Result": "Blood film (thick/thin smear) / PCR",
+        "Stool Cysts or Ova": "Stool O&P microscopy / antigen / PCR",
+        "Cysts on Imaging": "Ultrasound or CT of affected organ",
+        "Eosinophilia": "CBC with differential / IgE",
+        "Neurological Involvement": "MRI/CT or CSF exam if indicated",
+        "Vector Exposure": "Detailed exposure history (ticks, insects, fish/meat)",
+        "Anatomy Involvement": "Targeted imaging or biopsy",
+        "Symptoms": "Structured symptom review (GI, hepatic, neuro)",
+        "Liver Function Tests": "LFT panel",
+        "Fever": "Fever charting / malaria RDT",
+    }
+    for f, t in field_to_test.items():
+        u = user_input.get(f, ["Unknown"])
+        if u == ["Unknown"] or (isinstance(u, list) and all(x == "Unknown" for x in u)):
+            next_tests.append(t)
+
+    reason_text = " ".join(notes) if notes else "Pattern fits partially; limited direct matches."
+    return reason_text, next_tests
 
 # -----------------------------
 # LIVE DATA RELOAD
 # -----------------------------
 @st.cache_resource(show_spinner=False)
-def _init_identifier():
-    """Initialize once, kept as global resource object."""
+def init_engine():
     df = pd.read_excel(DATA_PATH)
     df.columns = [c.strip() for c in df.columns]
     df["Group"] = pd.to_numeric(df.get("Group"), errors="coerce")
@@ -85,12 +146,9 @@ def _init_identifier():
     return eng, df
 
 def reload_if_changed():
-    """Force reload when file timestamp changes."""
     mtime = os.path.getmtime(DATA_PATH)
-    last = st.session_state.get("_db_mtime")
+    last = st.session_state.get("_mtime")
     if not last or mtime != last:
-        st.session_state["_db_mtime"] = mtime
-        # fully reload from disk
         df = pd.read_excel(DATA_PATH)
         df.columns = [c.strip() for c in df.columns]
         df["Group"] = pd.to_numeric(df.get("Group"), errors="coerce")
@@ -99,26 +157,20 @@ def reload_if_changed():
         st.session_state["_engine"] = eng
         st.session_state["_df"] = df
         st.session_state["_mtime"] = mtime
-        return eng, df, mtime, True
-    else:
-        eng = st.session_state.get("_engine")
-        df = st.session_state.get("_df")
-        mtime = st.session_state.get("_mtime")
-        return eng, df, mtime, False
+        st.toast("🔄 Database reloaded automatically!", icon="✅")
+    return (
+        st.session_state.get("_engine"),
+        st.session_state.get("_df"),
+        st.session_state.get("_mtime"),
+    )
 
-
-# Initialize
 if "_engine" not in st.session_state:
-    eng, df = _init_identifier()
+    eng, df = init_engine()
     st.session_state["_engine"] = eng
     st.session_state["_df"] = df
     st.session_state["_mtime"] = os.path.getmtime(DATA_PATH)
-    st.session_state["_db_mtime"] = st.session_state["_mtime"]
 
-# Each run → check for changes
-eng, df, mtime, refreshed = reload_if_changed()
-if refreshed:
-    st.toast("🔄 Database reloaded automatically!", icon="✅")
+eng, df, mtime = reload_if_changed()
 
 # -----------------------------
 # SIDEBAR
@@ -171,7 +223,6 @@ st.caption("AI-assisted differential diagnosis for parasitic infections.")
 st.divider()
 
 if go:
-    # Prepare input
     ui = {
         "Countries Visited": countries or ["Unknown"],
         "Anatomy Involvement": anatomy or ["Unknown"],
@@ -194,8 +245,7 @@ if go:
     }
 
     results = eng.score_entry(ui)
-    df_merge = df[["Parasite", "Group_filled"]]
-    results = results.merge(df_merge, on="Parasite", how="left")
+    results = results.merge(df[["Parasite", "Group_filled"]], on="Parasite", how="left")
     results["Total Confidence (%)"] = (results["Score"] / FIXED_MAX_SCORE) * 100
 
     grouped = []
@@ -221,17 +271,45 @@ if go:
             f"{progress_bar_html(grp['Group Likelihood'], color)}</div>",
             unsafe_allow_html=True,
         )
+
         with st.expander("Expand group details", expanded=False):
             st.markdown(f"**Total Confidence:** {grp['Total Confidence']:.1f}%")
-            for _, row in grp["Top Rows"].iterrows():
-                st.markdown(f"**{row['Parasite']}** – {row.get('Key Test','')}")
+            st.markdown("#### Species in this group")
+
+            top_rows = grp["Top Rows"]
+            for i, row in top_rows.iterrows():
+                sp_color = pct_to_color(row["Likelihood (%)"])
+                st.markdown(
+                    f"**{row['Parasite']}** {pill(f'{row['Likelihood (%)']:.1f}%', sp_color)} "
+                    f"· Subtype: {row.get('Subtype','')}",
+                    unsafe_allow_html=True,
+                )
+
+                # get next species for comparison
+                runner = top_rows.iloc[1] if len(top_rows) >= 2 and i == top_rows.index[0] else None
+                reasoning, next_tests = generate_reasoning(row, ui, runner)
+
+                st.markdown(f"- **Reasoning:** {reasoning}")
+                if next_tests:
+                    st.markdown(f"- **Next tests to differentiate:** {', '.join(sorted(set(next_tests)))}")
+
+                key = str(row.get("Key Test", row.get("Key test", ""))).strip()
+                if key:
+                    st.markdown(f"- **Confirmatory / definitive tests:** {key}")
+
+                st.markdown(
+                    f"- **User Confidence:** {row['Likelihood (%)']:.1f}% "
+                    f"· **Total Confidence:** {row['Total Confidence (%)']:.1f}%"
+                )
+                st.markdown(" ")
+
         st.markdown("---")
 
 else:
-    st.info("Use the sidebar to enter data and click **Analyze** to generate results.")
+    st.info("Use the sidebar to input findings and click **Analyze** to generate results.")
 
 st.markdown(
     "<hr><div style='font-size:12px;color:#888;text-align:center;'>"
-    "<strong>Disclaimer:</strong> For assistance and training purposes only. Created by Zain.</div>",
+    "<strong>Disclaimer:</strong> ParAI-D is for assistance and training purposes only. Created by Zain.</div>",
     unsafe_allow_html=True
 )
