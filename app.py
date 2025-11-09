@@ -1,18 +1,12 @@
 import streamlit as st
 import pandas as pd
-import os
-import time
+import os, time
 from engine import ParasiteIdentifier, SENTINEL
 
-# -----------------------------------------
-# CONFIG
-# -----------------------------------------
-st.set_page_config(
-    page_title="🦠 ParAI-D: Intelligent Parasite Diagnostic Assistant",
-    layout="wide"
-)
+# ------------------------- CONFIG -------------------------
+st.set_page_config(page_title="🦠 ParAI-D: Intelligent Parasite Diagnostic Assistant", layout="wide")
 DATA_PATH = "ParasiteMasterData.xlsx"
-FIXED_MAX_SCORE = 113  # normalization baseline
+FIXED_MAX_SCORE = 113  # model-wide baseline
 
 GROUP_NAMES = {
     1: "Intestinal Protozoa",
@@ -28,9 +22,7 @@ GROUP_NAMES = {
     -1: "Unassigned / Unknown Group",
 }
 
-# -----------------------------------------
-# RESET (must run before widgets render)
-# -----------------------------------------
+# ------------------------- RESET FIRST -------------------------
 if st.session_state.get("__RESET_ALL__", False):
     for k in list(st.session_state.keys()):
         if k not in ["_engine", "_df", "_mtime", "__RESET_ALL__"]:
@@ -38,9 +30,7 @@ if st.session_state.get("__RESET_ALL__", False):
     st.session_state["__RESET_ALL__"] = False
     st.rerun()
 
-# -----------------------------------------
-# UTILS
-# -----------------------------------------
+# ------------------------- UTILS -------------------------
 def fmt_time(ts):
     try:
         return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts))
@@ -52,18 +42,19 @@ def split_vals(v):
 
 def get_unique_values(df, column, prepend_choose=False, extra=None):
     vals = []
-    for x in df[column].dropna().unique():
-        for part in str(x).split(";"):
-            part = part.strip()
-            if part:
-                vals.append(part)
+    if column in df.columns:
+        for x in df[column].dropna().unique():
+            for part in str(x).split(";"):
+                part = part.strip()
+                if part:
+                    vals.append(part)
     vals = sorted(set(vals))
     if extra:
         for e in extra:
             if e not in vals:
                 vals.append(e)
     if prepend_choose:
-        vals = ["Choose…"] + vals  # UI default that maps to SENTINEL in UI->engine mapping
+        vals = ["Choose…"] + vals  # maps to SENTINEL later
     return vals
 
 def pct_to_color(pct):
@@ -80,7 +71,6 @@ def progress_bar_html(percent, color):
     return f"<div style='background:#ddd;height:6px;border-radius:999px;overflow:hidden;margin-top:6px;'><div style='width:{percent:.1f}%;background:{color};height:100%;'></div></div>"
 
 def valid_field(val):
-    """Mirror engine._valid_user client-side for user confidence inclusion."""
     if not val:
         return False
     if isinstance(val, list):
@@ -89,14 +79,11 @@ def valid_field(val):
     v = str(val).lower()
     return v not in ("unknown", "choose…", "choose...", SENTINEL, "")
 
-# -----------------------------------------
-# ADAPTIVE REASONING
-# -----------------------------------------
+# ------------------------- REASONING -------------------------
 KEY_FIELDS_FOR_DIFF = [
     "Blood Film Result", "Cysts on Imaging", "Eosinophilia",
     "Vector Exposure", "Anatomy Involvement", "Countries Visited", "Symptoms"
 ]
-
 FIELD_TO_NEXT_TEST = {
     "Blood Film Result": "Blood film (thick/thin smear) or PCR",
     "Stool Cysts or Ova": "Stool O&P (concentration, trichrome); antigen or PCR",
@@ -116,7 +103,7 @@ def summarize_reasoning(top_row, user_input, competitors_df):
         return valid_field(v)
 
     def matches(field):
-        ds = split_vals(top_row.get(field, ""))
+        ds = split_vals(top_row.get(field, "") if field in top_row else top_row.get("ref_row", {}).get(field, ""))
         ui_vals = user_input.get(field, [])
         ui_vals = [x.lower() for x in ui_vals] if isinstance(ui_vals, list) else [str(ui_vals).lower()]
         ui_vals = [x for x in ui_vals if x not in ("unknown", "choose…", "choose...", SENTINEL, "")]
@@ -144,12 +131,12 @@ def summarize_reasoning(top_row, user_input, competitors_df):
         reasoning = f"The overall pattern is compatible with **{top_row['Parasite']}**, though direct matches are limited."
 
     comparisons = []
-    if not competitors_df.empty:
+    if isinstance(competitors_df, pd.DataFrame) and not competitors_df.empty:
         for _, comp in competitors_df.iterrows():
             diffs = []
             for f in KEY_FIELDS_FOR_DIFF:
-                a = str(top_row.get(f, "")).lower()
-                b = str(comp.get(f, "")).lower()
+                a = str(top_row.get(f, top_row.get('ref_row', {}).get(f, ""))).lower()
+                b = str(comp.get(f, comp.get('ref_row', {}).get(f, ""))).lower()
                 if a != b:
                     diffs.append(f)
             if diffs:
@@ -167,136 +154,36 @@ def summarize_reasoning(top_row, user_input, competitors_df):
 
     return reasoning, comparisons, next_tests
 
-# -----------------------------------------
-# USER CONFIDENCE (only scored fields)
-# -----------------------------------------
-def compute_user_confidence(row, ui):
-    def match(u_list, field):
-        ds = split_vals(row.get(field, ""))
-        u = [str(x).lower() for x in u_list if str(x).strip()]
-        u = [x for x in u if x not in ("unknown", "choose…", "choose...", SENTINEL, "")]
-        return any(x in ds for x in u)
-
-    score = 0.0
-    max_sc = 0.0
-
-    # Countries (5)
-    if valid_field(ui["Countries Visited"]):
-        max_sc += 5
-        if match(ui["Countries Visited"], "Countries Visited"): score += 5
-
-    # Anatomy (5)
-    if valid_field(ui["Anatomy Involvement"]):
-        max_sc += 5
-        if match(ui["Anatomy Involvement"], "Anatomy Involvement"): score += 5
-
-    # Vector (8)
-    if valid_field(ui["Vector Exposure"]):
-        max_sc += 8
-        lower_vec = [x.lower() for x in ui["Vector Exposure"]]
-        if lower_vec == ["other(including unknown)"]:
-            score += 8
-        elif match(ui["Vector Exposure"], "Vector Exposure"):
-            score += 8
-
-    # Symptoms (10) proportional
-    if valid_field(ui["Symptoms"]):
-        max_sc += 10
-        db = split_vals(row.get("Symptoms", ""))
-        entered = [s for s in ui["Symptoms"] if str(s).strip()]
-        matches = sum(1 for s in entered if str(s).lower() in db)
-        score += (10 / max(1, len(entered))) * matches
-
-    # Duration (5)
-    if valid_field(ui["Duration of Illness"]):
-        max_sc += 5
-        if match(ui["Duration of Illness"], "Duration of Illness"): score += 5
-
-    # Animal (8)
-    if valid_field(ui["Animal Contact Type"]):
-        max_sc += 8
-        if match(ui["Animal Contact Type"], "Animal Contact Type"): score += 8
-
-    # Blood Film (15) — Unknown/Choose ignored
-    bf = [str(x).lower() for x in ui["Blood Film Result"]][:1] or [SENTINEL]
-    db_bf = split_vals(row.get("Blood Film Result", ""))
-    if valid_field(bf):
-        max_sc += 15
-        if bf[0] == "negative":
-            if all(x != "negative" for x in db_bf): score -= 10
-        else:
-            if any(x != "negative" for x in db_bf): score += 15
-
-    # Immune (2)
-    if valid_field(ui["Immune Status"]):
-        max_sc += 2
-        if match(ui["Immune Status"], "Immune Status"): score += 2
-
-    # LFT (5)
-    lft = [str(x).lower() for x in ui["Liver Function Tests"]][:1] or [SENTINEL]
-    if valid_field(lft):
-        max_sc += 5
-        db_l = split_vals(row.get("Liver Function Tests", ""))
-        if "variable" in db_l or lft[0] in db_l: score += 5
-
-    # Binary (5 each)
-    for f in [
-        "Neurological Involvement","Eosinophilia","Fever","Diarrhea",
-        "Bloody Diarrhea","Stool Cysts or Ova","Anemia","High IgE Level"
-    ]:
-        v = [str(x).lower() for x in ui[f]][:1] or [SENTINEL]
-        if valid_field(v):
-            max_sc += 5
-            dbv = split_vals(row.get(f, ""))
-            if "variable" in dbv or v[0] in dbv: score += 5
-
-    # Cysts on Imaging (10) — Unknown/Choose ignored
-    c = [str(x).lower() for x in ui["Cysts on Imaging"]][:1] or [SENTINEL]
-    db_c = split_vals(row.get("Cysts on Imaging", ""))
-    if valid_field(c):
-        max_sc += 10
-        if c[0] == "negative":
-            if all(x != "negative" for x in db_c): score -= 5
-        else:
-            if any(x != "negative" for x in db_c): score += 10
-
-    return (score / max_sc) * 100 if max_sc > 0 else 0.0
-
-# -----------------------------------------
-# ENGINE INIT + LIVE RELOAD
-# -----------------------------------------
+# ------------------------- LOAD ENGINE + DF (live reload) -------------------------
 @st.cache_resource
-def init_engine():
-    df = pd.read_excel(DATA_PATH)
+def _init_engine_df(path: str):
+    df = pd.read_excel(path)
     df.columns = [c.strip() for c in df.columns]
+    # ensure numeric group and fallback
     df["Group"] = pd.to_numeric(df.get("Group"), errors="coerce")
     df["Group_filled"] = df["Group"].fillna(-1)
-    return ParasiteIdentifier(df), df
+    eng = ParasiteIdentifier(df)
+    return eng, df
 
 def reload_if_changed():
     mtime = os.path.getmtime(DATA_PATH)
     if "_mtime" not in st.session_state or mtime != st.session_state["_mtime"]:
-        df = pd.read_excel(DATA_PATH)
-        df.columns = [c.strip() for c in df.columns]
-        df["Group"] = pd.to_numeric(df.get("Group"), errors="coerce")
-        df["Group_filled"] = df["Group"].fillna(-1)
-        st.session_state["_engine"] = ParasiteIdentifier(df)
+        eng, df = _init_engine_df(DATA_PATH)
+        st.session_state["_engine"] = eng
         st.session_state["_df"] = df
         st.session_state["_mtime"] = mtime
         st.toast("🔄 Database reloaded!", icon="✅")
     return st.session_state["_engine"], st.session_state["_df"], st.session_state["_mtime"]
 
 if "_engine" not in st.session_state:
-    eng0, df0 = init_engine()
+    eng0, df0 = _init_engine_df(DATA_PATH)
     st.session_state["_engine"] = eng0
     st.session_state["_df"] = df0
     st.session_state["_mtime"] = os.path.getmtime(DATA_PATH)
 
 eng, df, mtime = reload_if_changed()
 
-# -----------------------------------------
-# SIDEBAR (with “Choose…” defaults for single-selects)
-# -----------------------------------------
+# ------------------------- SIDEBAR -------------------------
 with st.sidebar:
     st.markdown("### 📦 Database Info")
     st.caption(f"**ParasiteMasterData.xlsx** last updated: `{fmt_time(mtime)}`")
@@ -343,15 +230,13 @@ with st.sidebar:
             st.session_state["__RESET_ALL__"] = True
             st.rerun()
 
-# -----------------------------------------
-# MAIN
-# -----------------------------------------
+# ------------------------- MAIN -------------------------
 st.title("🦠 ParAI-D")
 st.caption("AI-assisted differential diagnosis for parasitic infections.")
 st.divider()
 
 if go:
-    # Map “Choose…” to SENTINEL for single-selects; multiselects remain [] when empty.
+    # Map single-selects "Choose…" to SENTINEL
     def as_single_list(v):
         if str(v).lower().startswith("choose"):
             return [SENTINEL]
@@ -379,20 +264,29 @@ if go:
     }
 
     results = eng.score_entry(ui)
-    results = results.merge(df[["Parasite", "Group"]], on="Parasite", how="left")
-    results["Group_filled"] = pd.to_numeric(results["Group"], errors="coerce").fillna(-1)
-    results["Total Confidence (%)"] = (results["Score"] / FIXED_MAX_SCORE) * 100
-    results["User Confidence (%)"] = results.apply(lambda r: compute_user_confidence(r, ui), axis=1)
 
-    st.caption("🟢 **User Confidence** = match quality based only on your entered fields · ⚪ **Total Confidence** = overall fit (normalized to all fields).")
+    # Ensure Group exists; engine already includes it, but guard just in case
+    if "Group" not in results.columns:
+        if "Group" in df.columns:
+            results = results.merge(df[["Parasite", "Group"]], on="Parasite", how="left")
+        else:
+            results["Group"] = -1
+
+    results["Group_filled"] = pd.to_numeric(results["Group"], errors="coerce").fillna(-1)
+
+    # Confidence metrics
+    results["Total Confidence (%)"] = (results["Score"] / FIXED_MAX_SCORE) * 100
+    results["User Confidence (%)"] = results.apply(lambda r: eng.compute_user_confidence(ui, r), axis=1)
+
+    st.caption("🟢 **User Confidence** = match quality based only on your entered fields · ⚪ **Total Confidence** = overall fit (normalised to all fields).")
     st.divider()
 
-    # Build groups
-    grouped = []
+    # Build group panels
+    groups = []
     for g, sub in results.groupby("Group_filled", dropna=False):
         sub = sub.sort_values("Likelihood (%)", ascending=False)
         top = sub.iloc[0]
-        grouped.append({
+        groups.append({
             "Group": int(g),
             "Name": GROUP_NAMES.get(int(g), f"Group {int(g)}"),
             "Rows": sub.head(5).copy(),
@@ -400,11 +294,12 @@ if go:
             "UserConf": float(top["User Confidence (%)"]),
             "TotalConf": float(top["Total Confidence (%)"])
         })
-    grouped = sorted(grouped, key=lambda x: x["Likelihood"], reverse=True)
+
+    groups = sorted(groups, key=lambda x: x["Likelihood"], reverse=True)
 
     # Render groups + species (with adaptive reasoning)
     first_group = True
-    for grp in grouped:
+    for grp in groups:
         color = pct_to_color(grp["Likelihood"])
         st.markdown(
             f"<div style='display:flex;flex-direction:column;gap:4px;margin:8px 0 2px 0;'>"
@@ -427,7 +322,7 @@ if go:
 
             for _, row in rows.iterrows():
                 title = f"{row['Parasite']} · Subtype {row.get('Subtype','')}"
-                # Nearby competitors within ±10% likelihood
+                # Nearby competitors within ±10% likelihood from *this group's* rows
                 nearby = rows[
                     (rows["Likelihood (%)"] >= row["Likelihood (%)"] - 10.0) &
                     (rows["Likelihood (%)"] <= row["Likelihood (%)"] + 10.0) &
@@ -441,7 +336,7 @@ if go:
                     # Reasoning
                     st.markdown(f"**Reasoning:** {reasoning}")
 
-                    # Comparisons (adaptive)
+                    # Comparisons
                     if comparisons:
                         st.markdown("**Comparison to close candidates:**")
                         for line in comparisons:
@@ -454,7 +349,7 @@ if go:
                         for t in next_tests:
                             st.markdown(f"- {t}")
 
-                    # Confirmatory tests — split on ';'
+                    # Confirmatory tests (split by ';')
                     key_text = str(row.get("Key Test", "")).strip()
                     if key_text:
                         bullets = [b.strip() for b in key_text.split(";") if b.strip()]
@@ -476,9 +371,7 @@ if go:
 else:
     st.info("Open the sidebar, fill known fields, and click **Analyze** to generate results.")
 
-# -----------------------------------------
-# FOOTER
-# -----------------------------------------
+# ------------------------- FOOTER -------------------------
 st.markdown(
     """
     <hr style="margin-top:28px;margin-bottom:8px"/>
