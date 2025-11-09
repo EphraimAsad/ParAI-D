@@ -10,7 +10,7 @@ from engine import ParasiteIdentifier
 st.set_page_config(page_title="🦠 ParAI-D: Intelligent Parasite Diagnostic Assistant", layout="wide")
 
 DATA_PATH = "ParasiteMasterData.xlsx"
-FIXED_MAX_SCORE = 113  # Maximum total possible test weight
+FIXED_MAX_SCORE = 113  # overall normalization
 
 GROUP_NAMES = {
     1: "Intestinal Protozoa",
@@ -28,7 +28,7 @@ GROUP_NAMES = {
 
 
 # -----------------------------
-# UTILITIES
+# UTILS
 # -----------------------------
 def fmt_time(ts):
     try:
@@ -36,30 +36,20 @@ def fmt_time(ts):
     except Exception:
         return "Unknown"
 
-
-@st.cache_data(show_spinner=False)
-def load_data_with_mtime(path: str):
-    """Load Excel and return (df, mtime). Cache busts when path or mtime changes."""
-    mtime = os.path.getmtime(path)
-    df = pd.read_excel(path)
-    df.columns = [c.strip() for c in df.columns]
-    return df, mtime
-
-
-def get_unique_values(df: pd.DataFrame, column: str):
+def get_unique_values(df, column, extra=None):
     vals = []
     for x in df[column].dropna().unique():
-        for part in str(x).split(";"):
-            part = part.strip()
-            if part:
-                vals.append(part)
+        vals.extend([p.strip() for p in str(x).split(";") if p.strip()])
     vals = sorted(set(vals))
+    if extra:
+        for e in extra:
+            if e not in vals:
+                vals.append(e)
     vals.insert(0, "Unknown")
     return vals
 
 
-def pct_to_color(pct: float) -> str:
-    """Map 0–100% to red→amber→green gradient."""
+def pct_to_color(pct: float):
     pct = max(0.0, min(100.0, pct)) / 100.0
     r = int(255 * (1 - pct))
     g = int(150 + 105 * pct)
@@ -67,91 +57,71 @@ def pct_to_color(pct: float) -> str:
     return f"#{r:02x}{g:02x}{b:02x}"
 
 
-def pill(text: str, color_hex: str):
+def pill(text, color):
     return f"""
-    <span style="
-        display:inline-block;
-        padding:4px 10px;
-        border-radius:999px;
-        background:{color_hex};
-        color:white;
-        font-weight:600;
-        font-size:12px;">
-        {text}
-    </span>
+    <span style='display:inline-block;padding:4px 10px;border-radius:999px;
+    background:{color};color:white;font-weight:600;font-size:12px;'>{text}</span>
     """
 
-
-def progress_bar_html(percent: float, color_hex: str):
+def progress_bar_html(percent, color):
     return f"""
-    <div style="background:#ddd; height:6px; border-radius:999px; overflow:hidden; margin-top:6px;">
-        <div style="width:{percent:.1f}%; background:{color_hex}; height:100%;"></div>
+    <div style='background:#ddd;height:6px;border-radius:999px;overflow:hidden;margin-top:6px;'>
+        <div style='width:{percent:.1f}%;background:{color};height:100%;'></div>
     </div>
     """
 
 
-def generate_reasoning(row, user_input):
-    """Simple interpretive reasoning summary."""
-    highlights = []
+# -----------------------------
+# LIVE DATA RELOAD
+# -----------------------------
+@st.cache_resource(show_spinner=False)
+def _init_identifier():
+    """Initialize once, kept as global resource object."""
+    df = pd.read_excel(DATA_PATH)
+    df.columns = [c.strip() for c in df.columns]
+    df["Group"] = pd.to_numeric(df.get("Group"), errors="coerce")
+    df["Group_filled"] = df["Group"].fillna(-1)
+    eng = ParasiteIdentifier(df)
+    return eng, df
 
-    def mlist(field):
-        return [s.strip().lower() for s in str(row.get(field, "Unknown")).split(";")]
+def reload_if_changed():
+    """Force reload when file timestamp changes."""
+    mtime = os.path.getmtime(DATA_PATH)
+    last = st.session_state.get("_db_mtime")
+    if not last or mtime != last:
+        st.session_state["_db_mtime"] = mtime
+        # fully reload from disk
+        df = pd.read_excel(DATA_PATH)
+        df.columns = [c.strip() for c in df.columns]
+        df["Group"] = pd.to_numeric(df.get("Group"), errors="coerce")
+        df["Group_filled"] = df["Group"].fillna(-1)
+        eng = ParasiteIdentifier(df)
+        st.session_state["_engine"] = eng
+        st.session_state["_df"] = df
+        st.session_state["_mtime"] = mtime
+        return eng, df, mtime, True
+    else:
+        eng = st.session_state.get("_engine")
+        df = st.session_state.get("_df")
+        mtime = st.session_state.get("_mtime")
+        return eng, df, mtime, False
 
-    if any(x.lower() in mlist("Vector Exposure") for x in user_input.get("Vector Exposure", [])):
-        highlights.append("Vector exposure aligns")
-    if any(x.lower() in mlist("Anatomy Involvement") for x in user_input.get("Anatomy Involvement", [])):
-        highlights.append("Organ involvement matches")
-    if any(x.lower() in mlist("Countries Visited") for x in user_input.get("Countries Visited", [])):
-        highlights.append("Geography consistent")
-    if user_input.get("Eosinophilia", ["Unknown"])[0].lower() in mlist("Eosinophilia"):
-        highlights.append("Eosinophilia pattern fits")
-    if user_input.get("Blood Film Result", ["Unknown"])[0].lower() in mlist("Blood Film Result"):
-        highlights.append("Blood film result supportive")
-    if user_input.get("Cysts on Imaging", ["Unknown"])[0].lower() in mlist("Cysts on Imaging"):
-        highlights.append("Imaging pattern consistent")
 
-    if not highlights:
-        return "Few direct matches; alignment primarily partial or indirect."
-    return " / ".join(highlights) + "."
+# Initialize
+if "_engine" not in st.session_state:
+    eng, df = _init_identifier()
+    st.session_state["_engine"] = eng
+    st.session_state["_df"] = df
+    st.session_state["_mtime"] = os.path.getmtime(DATA_PATH)
+    st.session_state["_db_mtime"] = st.session_state["_mtime"]
 
-
-def compare_with_runner_up(top_row, runner_row):
-    """Key difference summary for top 2 within a group."""
-    diffs = []
-    fields = [
-        "Vector Exposure", "Anatomy Involvement", "Countries Visited",
-        "Eosinophilia", "Blood Film Result", "Cysts on Imaging", "Symptoms"
-    ]
-    for f in fields:
-        a = str(top_row.get(f, "")).lower()
-        b = str(runner_row.get(f, "")).lower()
-        if a != b:
-            diffs.append(f)
-    if not diffs:
-        return "Very similar overall pattern to next candidate."
-    return "Key differentiators vs #2: " + ", ".join(diffs[:5]) + ("." if len(diffs) <= 5 else ", …")
-
+# Each run → check for changes
+eng, df, mtime, refreshed = reload_if_changed()
+if refreshed:
+    st.toast("🔄 Database reloaded automatically!", icon="✅")
 
 # -----------------------------
-# DATA LOADING (auto-reload)
-# -----------------------------
-df, mtime = load_data_with_mtime(DATA_PATH)
-
-# Add group fallback column
-df["Group"] = pd.to_numeric(df.get("Group"), errors="coerce")
-df["Group_filled"] = df["Group"].fillna(-1)
-
-if "db_mtime" not in st.session_state:
-    st.session_state["db_mtime"] = mtime
-elif mtime != st.session_state["db_mtime"]:
-    st.session_state["db_mtime"] = mtime
-    load_data_with_mtime.clear()
-    st.experimental_rerun()
-
-eng = ParasiteIdentifier(df)
-
-# -----------------------------
-# SIDEBAR INPUTS
+# SIDEBAR
 # -----------------------------
 with st.sidebar:
     st.markdown("### 📦 Database Info")
@@ -159,57 +129,56 @@ with st.sidebar:
     st.divider()
     st.header("⚙️ Input Parameters")
 
-    def multisel(label, col):
-        return st.multiselect(label, get_unique_values(df, col))
+    def multisel(label, col, extra=None): return st.multiselect(label, get_unique_values(df, col, extra))
+    def selbox(label, col, extra=None):
+        opts = get_unique_values(df, col, extra)
+        return st.selectbox(label, opts, index=0)
 
-    def selbox(label, col):
-        return st.selectbox(label, get_unique_values(df, col), index=0)
+    with st.expander("🌍 Environmental Data", expanded=False):
+        countries = multisel("Countries Visited", "Countries Visited")
+        anatomy = multisel("Anatomy Involvement", "Anatomy Involvement")
+        vector = multisel("Vector Exposure", "Vector Exposure")
 
-    countries = multisel("Countries Visited", "Countries Visited")
-    anatomy = multisel("Anatomy Involvement", "Anatomy Involvement")
-    vector = multisel("Vector Exposure", "Vector Exposure")
+    with st.expander("🧬 Symptomatic Data", expanded=False):
+        symptoms = multisel("Symptoms", "Symptoms")
+        duration = st.multiselect("Duration of Illness", get_unique_values(df, "Duration of Illness"))
 
-    st.markdown("---")
-    symptoms = multisel("Symptoms", "Symptoms")
-    duration = st.multiselect("Duration of Illness", get_unique_values(df, "Duration of Illness"))
+    with st.expander("🧫 Laboratory Data", expanded=False):
+        blood_film = selbox("Blood Film Result", "Blood Film Result")
+        lft = selbox("Liver Function Tests", "Liver Function Tests")
+        cysts_imaging = selbox("Cysts on Imaging", "Cysts on Imaging", extra=["None"])
+        neuro = selbox("Neurological Involvement", "Neurological Involvement")
+        eos = selbox("Eosinophilia", "Eosinophilia")
+        fever = selbox("Fever", "Fever")
+        diarrhea = selbox("Diarrhea", "Diarrhea")
+        bloody = selbox("Bloody Diarrhea", "Bloody Diarrhea")
+        stool = selbox("Stool Cysts or Ova", "Stool Cysts or Ova")
+        anemia = selbox("Anemia", "Anemia")
+        ige = selbox("High IgE Level", "High IgE Level")
 
-    st.markdown("---")
-    animal = st.multiselect("Animal Contact Type", get_unique_values(df, "Animal Contact Type"))
-    immune = selbox("Immune Status", "Immune Status")
-
-    st.markdown("---")
-    blood_film = selbox("Blood Film Result", "Blood Film Result")
-    lft = selbox("Liver Function Tests", "Liver Function Tests")
-    cysts_imaging = selbox("Cysts on Imaging", "Cysts on Imaging")
-
-    neuro = selbox("Neurological Involvement", "Neurological Involvement")
-    eos = selbox("Eosinophilia", "Eosinophilia")
-    fever = selbox("Fever", "Fever")
-    diarrhea = selbox("Diarrhea", "Diarrhea")
-    bloody = selbox("Bloody Diarrhea", "Bloody Diarrhea")
-    stool = selbox("Stool Cysts or Ova", "Stool Cysts or Ova")
-    anemia = selbox("Anemia", "Anemia")
-    ige = selbox("High IgE Level", "High IgE Level")
+    with st.expander("🧩 Other", expanded=False):
+        animal = st.multiselect("Animal Contact Type", get_unique_values(df, "Animal Contact Type"))
+        immune = selbox("Immune Status", "Immune Status")
 
     st.markdown("---")
     go = st.button("🔍 Analyze", use_container_width=True)
 
 # -----------------------------
-# MAIN OUTPUT AREA
+# MAIN
 # -----------------------------
 st.title("🦠 ParAI-D")
 st.caption("AI-assisted differential diagnosis for parasitic infections.")
 st.divider()
 
 if go:
-    # Prepare inputs
-    user_inputs = {
-        "Countries Visited": countries if countries else ["Unknown"],
-        "Anatomy Involvement": anatomy if anatomy else ["Unknown"],
-        "Vector Exposure": vector if vector else ["Unknown"],
-        "Symptoms": symptoms if symptoms else ["Unknown"],
-        "Duration of Illness": duration if duration else ["Unknown"],
-        "Animal Contact Type": animal if animal else ["Unknown"],
+    # Prepare input
+    ui = {
+        "Countries Visited": countries or ["Unknown"],
+        "Anatomy Involvement": anatomy or ["Unknown"],
+        "Vector Exposure": vector or ["Unknown"],
+        "Symptoms": symptoms or ["Unknown"],
+        "Duration of Illness": duration or ["Unknown"],
+        "Animal Contact Type": animal or ["Unknown"],
         "Blood Film Result": [blood_film],
         "Immune Status": [immune],
         "Liver Function Tests": [lft],
@@ -224,100 +193,45 @@ if go:
         "Cysts on Imaging": [cysts_imaging],
     }
 
-    # Run engine
-    results = eng.score_entry(user_inputs)
+    results = eng.score_entry(ui)
+    df_merge = df[["Parasite", "Group_filled"]]
+    results = results.merge(df_merge, on="Parasite", how="left")
     results["Total Confidence (%)"] = (results["Score"] / FIXED_MAX_SCORE) * 100
-
-    # Attach group mapping
-    results = results.merge(df[["Parasite", "Group_filled"]], on="Parasite", how="left")
 
     grouped = []
     for g, sub in results.groupby("Group_filled", dropna=False):
-        sub = sub.sort_values("Likelihood (%)", ascending=False)
-        top = sub.iloc[0]
-        group_name = GROUP_NAMES.get(int(g), f"Group {g}")
+        top = sub.sort_values("Likelihood (%)", ascending=False).iloc[0]
         grouped.append({
             "Group": int(g),
-            "Group Name": group_name,
-            "Top Rows": sub.head(5).copy(),
+            "Group Name": GROUP_NAMES.get(int(g), f"Group {g}"),
+            "Top Rows": sub.sort_values("Likelihood (%)", ascending=False).head(5).copy(),
             "Group Likelihood": float(top["Likelihood (%)"]),
-            "User Confidence": float(top["Likelihood (%)"]),
             "Total Confidence": float(top["Total Confidence (%)"]),
         })
 
     grouped = sorted(grouped, key=lambda x: x["Group Likelihood"], reverse=True)
 
-    # -----------------------------
-    # Render each group block
-    # -----------------------------
-    for gbloc in grouped:
-        color = pct_to_color(gbloc["Group Likelihood"])
-        chip = pill(f"{gbloc['Group Likelihood']:.1f}% likely", color)
-        prog = progress_bar_html(gbloc["Group Likelihood"], color)
-
+    for grp in grouped:
+        color = pct_to_color(grp["Group Likelihood"])
         st.markdown(
-            f"""
-            <div style="display:flex;align-items:center;gap:12px;margin:8px 0 2px 0;">
-                <div style="font-size:20px;font-weight:700;line-height:1.2;">
-                    {gbloc['Group Name']}
-                </div>
-                {chip}
-            </div>
-            {prog}
-            """,
+            f"<div style='display:flex;flex-direction:column;gap:4px;margin:8px 0 2px 0;'>"
+            f"<div style='display:flex;align-items:center;gap:12px;'>"
+            f"<div style='font-size:20px;font-weight:700;line-height:1.2;'>{grp['Group Name']}</div>"
+            f"{pill(f'{grp['Group Likelihood']:.1f}% likely', color)}</div>"
+            f"{progress_bar_html(grp['Group Likelihood'], color)}</div>",
             unsafe_allow_html=True,
         )
-
         with st.expander("Expand group details", expanded=False):
-            st.markdown(
-                f"**User Confidence:** {gbloc['User Confidence']:.1f}%  |  "
-                f"**Total Confidence:** {gbloc['Total Confidence']:.1f}%"
-            )
-
-            top_rows = gbloc["Top Rows"]
-            if len(top_rows) >= 2:
-                cmp_txt = compare_with_runner_up(top_rows.iloc[0], top_rows.iloc[1])
-                st.markdown(f"**Comparison to similar values/subtypes:** {cmp_txt}")
-            else:
-                st.markdown("**Comparison to similar values/subtypes:** Not enough candidates in this group.")
-            st.markdown("---")
-            st.markdown("#### Species in this group")
-
-            for _, row in top_rows.iterrows():
-                sp_color = pct_to_color(row["Likelihood (%)"])
-                sp_chip = pill(f"{row['Likelihood (%)']:.1f}%", sp_color)
-                st.markdown(
-                    f"**{row['Parasite']}** {sp_chip}  ·  Subtype: {row.get('Subtype', '')}",
-                    unsafe_allow_html=True,
-                )
-                reason = generate_reasoning(row, user_inputs)
-                st.markdown(f"- **Reasoning:** {reason}")
-                kt = str(row.get("Key Test", "")).strip()
-                if kt:
-                    st.markdown(f"- **Key tests:** {kt}")
-                st.markdown(
-                    f"- **User Confidence:** {row['Likelihood (%)']:.1f}%"
-                    f"  ·  **Total Confidence:** {row['Total Confidence (%)']:.1f}%"
-                )
-                st.markdown(" ")
-
-            st.markdown(" ")
-
+            st.markdown(f"**Total Confidence:** {grp['Total Confidence']:.1f}%")
+            for _, row in grp["Top Rows"].iterrows():
+                st.markdown(f"**{row['Parasite']}** – {row.get('Key Test','')}")
         st.markdown("---")
 
 else:
-    st.info("Use the sidebar to enter parameters and click **Analyze** to generate results.")
+    st.info("Use the sidebar to enter data and click **Analyze** to generate results.")
 
-# -----------------------------
-# FOOTER
-# -----------------------------
 st.markdown(
-    """
-    <hr style="margin-top:28px;margin-bottom:8px"/>
-    <div style="font-size:12px; color:#888; text-align:center; padding-bottom:8px;">
-        <strong>Disclaimer:</strong> ParAI-D is for assistance and training purposes only and is not a substitute for clinical judgement.<br/>
-        Created by Zain.
-    </div>
-    """,
+    "<hr><div style='font-size:12px;color:#888;text-align:center;'>"
+    "<strong>Disclaimer:</strong> For assistance and training purposes only. Created by Zain.</div>",
     unsafe_allow_html=True
 )
