@@ -7,9 +7,12 @@ from engine import ParasiteIdentifier, SENTINEL
 # -----------------------------------------
 # CONFIG
 # -----------------------------------------
-st.set_page_config(page_title="🦠 ParAI-D: Intelligent Parasite Diagnostic Assistant", layout="wide")
+st.set_page_config(
+    page_title="🦠 ParAI-D: Intelligent Parasite Diagnostic Assistant",
+    layout="wide"
+)
 DATA_PATH = "ParasiteMasterData.xlsx"
-FIXED_MAX_SCORE = 113
+FIXED_MAX_SCORE = 113  # normalization baseline
 
 GROUP_NAMES = {
     1: "Intestinal Protozoa",
@@ -60,7 +63,7 @@ def get_unique_values(df, column, prepend_choose=False, extra=None):
             if e not in vals:
                 vals.append(e)
     if prepend_choose:
-        vals = ["Choose…"] + vals  # UI default that maps to SENTINEL
+        vals = ["Choose…"] + vals  # UI default that maps to SENTINEL in UI->engine mapping
     return vals
 
 def pct_to_color(pct):
@@ -77,7 +80,7 @@ def progress_bar_html(percent, color):
     return f"<div style='background:#ddd;height:6px;border-radius:999px;overflow:hidden;margin-top:6px;'><div style='width:{percent:.1f}%;background:{color};height:100%;'></div></div>"
 
 def valid_field(val):
-    """Mirror engine._valid_user client-side for user confidence."""
+    """Mirror engine._valid_user client-side for user confidence inclusion."""
     if not val:
         return False
     if isinstance(val, list):
@@ -237,7 +240,10 @@ def compute_user_confidence(row, ui):
         if "variable" in db_l or lft[0] in db_l: score += 5
 
     # Binary (5 each)
-    for f in ["Neurological Involvement","Eosinophilia","Fever","Diarrhea","Bloody Diarrhea","Stool Cysts or Ova","Anemia","High IgE Level"]:
+    for f in [
+        "Neurological Involvement","Eosinophilia","Fever","Diarrhea",
+        "Bloody Diarrhea","Stool Cysts or Ova","Anemia","High IgE Level"
+    ]:
         v = [str(x).lower() for x in ui[f]][:1] or [SENTINEL]
         if valid_field(v):
             max_sc += 5
@@ -292,41 +298,48 @@ eng, df, mtime = reload_if_changed()
 # SIDEBAR (with “Choose…” defaults for single-selects)
 # -----------------------------------------
 with st.sidebar:
-    st.caption(f"**Database last updated:** `{fmt_time(mtime)}`")
+    st.markdown("### 📦 Database Info")
+    st.caption(f"**ParasiteMasterData.xlsx** last updated: `{fmt_time(mtime)}`")
     st.divider()
 
-    st.subheader("🌍 Environmental Data")
-    countries = st.multiselect("Countries Visited", get_unique_values(df, "Countries Visited"))
-    anatomy   = st.multiselect("Anatomy Involvement", get_unique_values(df, "Anatomy Involvement"))
-    vector    = st.multiselect("Vector Exposure", get_unique_values(df, "Vector Exposure"))
+    st.header("⚙️ Input Parameters")
 
-    st.subheader("🧬 Symptomatic Data")
-    symptoms  = st.multiselect("Symptoms", get_unique_values(df, "Symptoms"))
-    duration  = st.multiselect("Duration of Illness", get_unique_values(df, "Duration of Illness"))
+    # Environmental
+    with st.expander("🌍 Environmental Data", expanded=False):
+        countries = st.multiselect("Countries Visited", get_unique_values(df, "Countries Visited"))
+        anatomy   = st.multiselect("Anatomy Involvement", get_unique_values(df, "Anatomy Involvement"))
+        vector    = st.multiselect("Vector Exposure", get_unique_values(df, "Vector Exposure"))
 
-    st.subheader("🧫 Laboratory Data")
-    blood_film    = st.selectbox("Blood Film Result", get_unique_values(df, "Blood Film Result", prepend_choose=True))
-    lft           = st.selectbox("Liver Function Tests", get_unique_values(df, "Liver Function Tests", prepend_choose=True))
-    cysts_imaging = st.selectbox("Cysts on Imaging", get_unique_values(df, "Cysts on Imaging", prepend_choose=True, extra=["None"]))
-    neuro         = st.selectbox("Neurological Involvement", get_unique_values(df, "Neurological Involvement", prepend_choose=True))
-    eos           = st.selectbox("Eosinophilia", get_unique_values(df, "Eosinophilia", prepend_choose=True))
-    fever         = st.selectbox("Fever", get_unique_values(df, "Fever", prepend_choose=True))
-    diarrhea      = st.selectbox("Diarrhea", get_unique_values(df, "Diarrhea", prepend_choose=True))
-    bloody        = st.selectbox("Bloody Diarrhea", get_unique_values(df, "Bloody Diarrhea", prepend_choose=True))
-    stool         = st.selectbox("Stool Cysts or Ova", get_unique_values(df, "Stool Cysts or Ova", prepend_choose=True))
-    anemia        = st.selectbox("Anemia", get_unique_values(df, "Anemia", prepend_choose=True))
-    ige           = st.selectbox("High IgE Level", get_unique_values(df, "High IgE Level", prepend_choose=True))
+    # Symptoms
+    with st.expander("🧬 Symptomatic Data", expanded=False):
+        symptoms  = st.multiselect("Symptoms", get_unique_values(df, "Symptoms"))
+        duration  = st.multiselect("Duration of Illness", get_unique_values(df, "Duration of Illness"))
 
-    st.subheader("🧩 Other")
-    animal = st.multiselect("Animal Contact Type", get_unique_values(df, "Animal Contact Type"))
-    immune = st.selectbox("Immune Status", get_unique_values(df, "Immune Status", prepend_choose=True))
+    # Lab
+    with st.expander("🧫 Laboratory Data", expanded=False):
+        blood_film    = st.selectbox("Blood Film Result", get_unique_values(df, "Blood Film Result", prepend_choose=True))
+        lft           = st.selectbox("Liver Function Tests", get_unique_values(df, "Liver Function Tests", prepend_choose=True))
+        cysts_imaging = st.selectbox("Cysts on Imaging", get_unique_values(df, "Cysts on Imaging", prepend_choose=True, extra=["None"]))
+        neuro         = st.selectbox("Neurological Involvement", get_unique_values(df, "Neurological Involvement", prepend_choose=True))
+        eos           = st.selectbox("Eosinophilia", get_unique_values(df, "Eosinophilia", prepend_choose=True))
+        fever         = st.selectbox("Fever", get_unique_values(df, "Fever", prepend_choose=True))
+        diarrhea      = st.selectbox("Diarrhea", get_unique_values(df, "Diarrhea", prepend_choose=True))
+        bloody        = st.selectbox("Bloody Diarrhea", get_unique_values(df, "Bloody Diarrhea", prepend_choose=True))
+        stool         = st.selectbox("Stool Cysts or Ova", get_unique_values(df, "Stool Cysts or Ova", prepend_choose=True))
+        anemia        = st.selectbox("Anemia", get_unique_values(df, "Anemia", prepend_choose=True))
+        ige           = st.selectbox("High IgE Level", get_unique_values(df, "High IgE Level", prepend_choose=True))
 
-    st.divider()
+    # Other
+    with st.expander("🧩 Other", expanded=False):
+        animal = st.multiselect("Animal Contact Type", get_unique_values(df, "Animal Contact Type"))
+        immune = st.selectbox("Immune Status", get_unique_values(df, "Immune Status", prepend_choose=True))
+
+    st.markdown("---")
     colA, colB = st.columns(2)
     with colA:
         go = st.button("🔍 Analyze", use_container_width=True)
     with colB:
-        if st.button("♻ Reset All", use_container_width=True):
+        if st.button("♻️ Reset all", use_container_width=True):
             st.session_state["__RESET_ALL__"] = True
             st.rerun()
 
@@ -338,20 +351,20 @@ st.caption("AI-assisted differential diagnosis for parasitic infections.")
 st.divider()
 
 if go:
-    # Map “Choose…” to SENTINEL for all single-selects; multiselects stay [] when empty.
+    # Map “Choose…” to SENTINEL for single-selects; multiselects remain [] when empty.
     def as_single_list(v):
         if str(v).lower().startswith("choose"):
             return [SENTINEL]
         return [v]
 
     ui = {
-        "Countries Visited": countries,                  # [] when none
-        "Anatomy Involvement": anatomy,                  # []
-        "Vector Exposure": vector,                       # []
-        "Symptoms": symptoms,                            # []
-        "Duration of Illness": duration,                 # []
-        "Animal Contact Type": animal,                   # []
-        "Blood Film Result": as_single_list(blood_film), # [SENTINEL] when Choose…
+        "Countries Visited": countries,
+        "Anatomy Involvement": anatomy,
+        "Vector Exposure": vector,
+        "Symptoms": symptoms,
+        "Duration of Illness": duration,
+        "Animal Contact Type": animal,
+        "Blood Film Result": as_single_list(blood_film),
         "Immune Status": as_single_list(immune),
         "Liver Function Tests": as_single_list(lft),
         "Neurological Involvement": as_single_list(neuro),
@@ -371,7 +384,7 @@ if go:
     results["Total Confidence (%)"] = (results["Score"] / FIXED_MAX_SCORE) * 100
     results["User Confidence (%)"] = results.apply(lambda r: compute_user_confidence(r, ui), axis=1)
 
-    st.caption("🟢 **User Confidence** = match quality based only on your entered fields · ⚪ **Total Confidence** = overall fit (normalised to all fields).")
+    st.caption("🟢 **User Confidence** = match quality based only on your entered fields · ⚪ **Total Confidence** = overall fit (normalized to all fields).")
     st.divider()
 
     # Build groups
@@ -461,7 +474,7 @@ if go:
         first_group = False
 
 else:
-    st.info("Enter data in the sidebar and click **Analyze** to generate results.")
+    st.info("Open the sidebar, fill known fields, and click **Analyze** to generate results.")
 
 # -----------------------------------------
 # FOOTER
