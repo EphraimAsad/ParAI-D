@@ -14,7 +14,7 @@ class ParasiteIdentifier:
         self.df = df.copy()
         self.df.columns = [c.strip() for c in self.df.columns]
 
-        # normalise known optional column names
+        # Normalise known optional Key Test column names
         if "Key Test" not in self.df.columns:
             for alt in ["Key test", "Key Tests", "Key notes", "Key Notes"]:
                 if alt in self.df.columns:
@@ -23,7 +23,8 @@ class ParasiteIdentifier:
         if "Key Test" not in self.df.columns:
             self.df["Key Test"] = ""
 
-        # expose fixed max score (for Total Confidence)
+        # Expose fixed max score (for Total Confidence)
+        # Based on your latest weights: 5 + 5 + 8 + 10 + 5 + 8 + 15 + 2 + 5 + (8 binary *5) + 10 = 113
         self.max_possible_score = 113
 
     # --------------- helpers -----------------
@@ -171,6 +172,7 @@ class ParasiteIdentifier:
         Mirrors scoring rules but normalises to the max of only entered fields.
         """
         def gl(field):
+            # pull from result row if provided, else from the stored ref_row
             return self._split(row.get(field, "") if field in row else row.get("ref_row", {}).get(field, ""))
 
         def match(u_list, field):
